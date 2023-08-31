@@ -1,0 +1,8 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP MT8816
+D 8x16 Analog Switch Array, DIP40
+K analog switch
+$ENDCMP
+#
+#End Doc Library
