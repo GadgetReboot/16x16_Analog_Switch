@@ -26,12 +26,18 @@
 // https://www.youtube.com/gadgetreboot
 
 #include <Adafruit_MCP23X17.h>
+#include <Wire.h>                                     // I2C library for display
+#include <Adafruit_GFX.h>                             // graphics library for display
+#include <Adafruit_SSD1306.h>                         // SSD1306 OLED display library
 
+#define OLED_RESET 4                                  // OLED library likes to see this but it isn't used here with I2C
+#define OLED_ADDR 0x3C                                // OLED I2C address
 #define addr 0x20     // mcp23017 address when all address pins are grounded
 #define closed 1      // crosspoint junction is connected when mt8816 data = 1
 #define opened 0      // crosspoint junction is disconnected when mt8816 data = 0
 
 Adafruit_MCP23X17 mcp;  // mcp23017 object to communicate with
+Adafruit_SSD1306 display(OLED_RESET);  // oled display
 
 // assign mcp23017 gpio pins to mt8816 pin functions based on schematic wiring
 #define pinCS0 15      // chip select
@@ -47,11 +53,26 @@ Adafruit_MCP23X17 mcp;  // mcp23017 object to communicate with
 #define pinAX2 3
 #define pinAX3 4
 
+// assign input switches to gpio
+const byte sw1 = 2;
+const byte sw2 = 3;
+const byte sw3 = 4;
+const byte sw4 = 5;
+
 bool switchMatrix[16][16];  // 16x16 matrix to store switch states in memory as a reference/record
+const byte xChSize = 16;    // number of channels along x-axis
+int xCh[xChSize];           // store which y-channel will connect to each x-channel (-1 = no connect)
+int chOrder[xChSize];       // store the sequence of x-y connections in the signal chain
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("16x16 Crosspoint Switch Demo");
+  Serial.println("\r\n16x16 Crosspoint Switch Demo");
+
+  // configure gpio
+  pinMode(sw1, INPUT_PULLUP);
+  pinMode(sw2, INPUT_PULLUP);
+  pinMode(sw3, INPUT_PULLUP);
+  pinMode(sw4, INPUT_PULLUP);
 
   // init gpio expander
   if (!mcp.begin_I2C(addr)) {
@@ -73,24 +94,101 @@ void setup() {
   mcp.pinMode(pinCS0, OUTPUT);
   mcp.pinMode(pinCS1, OUTPUT);
 
-  mcp.digitalWrite(pinCS0, LOW);       // disable mt8816 chip selects
+  // disable mt8816 chips (set chip selects low)
+  mcp.digitalWrite(pinCS0, LOW);
   mcp.digitalWrite(pinCS1, LOW);
-  mcp.digitalWrite(pinReset, HIGH);    // reset mt8816 chips (open all switch junctions)
-  delay(100);
-  mcp.digitalWrite(pinReset, LOW);     // take mt8816 chips out of reset
+
+  // init oled
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);     // init OLED display
+  display.clearDisplay();                             // blank the display
+  display.setTextSize(1);                             // configure text properties
+  display.setTextColor(WHITE);
+
+  display.clearDisplay();                             // clear display
+  display.setCursor(0, 0);                            // set cursor to top left corner of the display
+  display.println("Loop Switcher");
+  display.println("All Paths Open");
+  display.display();                                  // update display
+
+  // init x-y node connection array to indicate no nodes are connected from x to y  (set y = -1 for each x channel)
+  clear_xy_data();
+  resetMatrix();                                      // reset entire matrix (disconnect all node junctions)
+  printMatrix();                                      // debug print the matrix configuration
 
 }
 
 void loop() {
-  // demo1();  // demo - switch various matrix nodes on and off to route test signals through matrix
-  demo2();
 
-  // reset all junction connections
+  if (!digitalRead(sw1)) {
+    delay(100);  // crude debounce
+    for (byte i = 0; i < xChSize; i++) {    // clear signal routing path and create a new signal chain
+      chOrder[i] = -1;
+    }
+    // define the new channel ordering sequence
+    chOrder[0] = 0;     // input goes straight to output (channel x0 to y0)
+    configureMatrix();  // implement the new signal chain
+  }
+
+  if (!digitalRead(sw2)) {
+    delay(100);  // crude debounce
+    for (byte i = 0; i < xChSize; i++) {    // clear signal routing path and create a new signal chain
+      chOrder[i] = -1;
+    }
+    // define the new channel ordering sequence
+    chOrder[0] = 1;     // input goes to ch1, then to output
+    chOrder[1] = 0;
+    configureMatrix();  // implement the new signal chain
+  }
+
+  if (!digitalRead(sw3)) {
+    delay(100);  // crude debounce
+    for (byte i = 0; i < xChSize; i++) {    // clear signal routing path and create a new signal chain
+      chOrder[i] = -1;
+    }
+    // define the new channel ordering sequence
+    chOrder[0] = 1;     // input goes to ch1, ch1 to ch2, ch2 to output
+    chOrder[1] = 2;
+    chOrder[2] = 0;
+    configureMatrix();  // implement the new signal chain
+  }
+
+  if (!digitalRead(sw4)) {
+    delay(100);  // crude debounce
+    for (byte i = 0; i < xChSize; i++) {    // clear signal routing path and create a new signal chain
+      chOrder[i] = -1;
+    }
+    // define the new channel ordering sequence
+    chOrder[0] = 1;     // input goes to ch1, ch1 to ch2, ch2 to ch3, ch3 to output
+    chOrder[1] = 2;
+    chOrder[2] = 3;
+    chOrder[3] = 0;
+    configureMatrix();  // implement the new signal chain
+  }
+
+}
+
+void print_xCh() {
+  Serial.print("xCh Data: ");
+  for (byte i = 0; i < xChSize; i++) {
+    Serial.print(" ");
+    Serial.print(xCh[i]);
+  }
+  Serial.println();
+
+}
+
+void clear_xy_data() {
+  for (byte i = 0; i < xChSize; i++) {
+    xCh[i] = -1;
+  }
+}
+
+// reset all junction connections
+void resetMatrix() {
   mcp.digitalWrite(pinReset, HIGH);
   delay(100);
   mcp.digitalWrite(pinReset, LOW);
 }
-
 
 // based on mt8816 library https://github.com/DatanoiseTV/MT8816/
 // modified to support two mt8816's arranged as a larger 16x16 matrix
@@ -140,44 +238,73 @@ bool getState(uint8_t x, uint8_t y)
   return switchMatrix[x][y];
 }
 
-void demo1() {
-  // connect or disconnect (x,y) nodes
-  setJunction(0, 5, closed);
-  Serial.println(getState(0, 5) ? "X0 Y5 is Closed" : "X0 Y5 is Opened");
-  delay (1000);
+void configureMatrix() {
+  /*  chOrder contains the sequence of channel to channel connections from input to final output channel
+       where the input is at x channel 0  and the output is at y channel 0 (each row/column has ch 0-15 available)
+       eg.  chOrder [2, 1, 0]  means the matrix nodes are routed from input to ch2, then ch2 to ch1, then ch1 to output
 
-  setJunction(0, 8, closed);
-  delay (1000);
+       xCh defines which y channel [0..15] is connected to each x channel [0..15]
+       eg. xCh[2, 0, 1] means that xCh[0] connects to y channel 2, xCh[1] connects to y channel 0, etc
 
-  setJunction(7, 15, closed);
-  delay (1000);
+       an assigned value of -1 means nothing is assigned or connected to that channel
+  */
 
-  setJunction(10, 10, closed);
-  delay (1000);
+  int xChNew[16] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}; // create new x-y node connections to be implemented
 
-  // disconnect X10 from Y10 and Connect X7 to Y10
-  setJunction(10, 10, opened);
-  setJunction(7, 10, closed);
-  delay (1000);
+  // debug print the intended signal chain routing
+  Serial.print("\r\nNew Signal Chain\r\nchOrder: ");
+  for (byte i = 0; i < xChSize; i++) {
+    Serial.print(" ");
+    Serial.print(chOrder[i]);
+  }
+  Serial.println();
+
+  // update signal chain on oled
+  display.clearDisplay();                             // clear display
+  display.setCursor(0, 0);                            // set cursor to top left corner of the display
+  display.println("Loop Switcher");
+  display.print("In > ");
+  for (byte i = 0; i < xChSize; i++) {
+    if (chOrder[i] == 0) break;
+    display.print(chOrder[i]);
+    display.print(" > ");
+  }
+  display.print("Out");
+  display.display();                                    // update display
+
+
+  // connect the appropriate x and y nodes based on the chOrder data
+  xChNew[0] = chOrder[0];
+  for (byte i = 0; i < xChSize; i++) {
+    if (chOrder[i + 1] == -1)  // exit for loop when routing is completed
+      break;
+    xChNew[chOrder[i]] = chOrder[i + 1];
+  }
+
+  // disconnect old unneeded junctions, reconnect new nodes
+
+  for (byte i = 0; i < xChSize; i++) {
+    if (xCh[i] != xChNew[i]) {           // open or close matrix junctions to reflect new signal chain
+      setJunction(i, xCh[i], opened);
+      setJunction(i, xChNew[i], closed);
+    }
+    xCh[i] = xChNew[i];                  // update the current x channel's signal mapping to destination y channel
+  }
+  print_xCh();                           // debug print the final signal chain routing for confirmation of mapping
+  printMatrix();                         // debug print the matrix configuration
 }
 
-void demo2() {
-  // connect or disconnect (x,y) nodes
-  setJunction(13, 13, closed);
-  delay (5000);
-
-  setJunction(13, 13, opened);
-  setJunction(13, 2, closed);
-  setJunction(2, 13, closed);
-  delay (5000);
-
-  setJunction(2, 13, opened);
-  setJunction(2, 3, closed);
-  setJunction(3, 13, closed);
-  delay (5000);
-
-  setJunction(3, 13, opened);
-  setJunction(3, 12, closed);
-  setJunction(12, 13, closed);
-  delay (5000);
+void printMatrix() {
+  Serial.println("\r\nMatrix Map");
+  for (byte i = xChSize; i > 0; i--) {
+    if (i - 1 < 10) Serial.print(" ");
+    Serial.print(i - 1);  Serial.print(":");
+    for (byte j = 0; j < xChSize; j++) {
+      Serial.print(" ");
+      Serial.print(getState(j, i - 1) ? "X " : "- ");
+    }
+    Serial.println();
+  }
+  Serial.print("    0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15");
+  Serial.println();
 }
